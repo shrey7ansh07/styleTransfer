@@ -1,0 +1,6 @@
+encoder:
+  _stats_content: ((0 , 0, 0), (255, 255, 255))
+  _stats: ((123.675,116.28,103.53), (58.395,57.12,57.375))
+  batch_size: 8
+  resize_dimensions: (512, 512)
+  random_crop_dimension: (256, 256)
