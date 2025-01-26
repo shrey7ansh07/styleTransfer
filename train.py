@@ -316,7 +316,11 @@ class Decoder(nn.Module):
 dec = Decoder()
 
 
-
+def gram_matrix(features):
+        batch_size,c,h,w=features.size()
+        features=features.view(batch_size,c,-1)
+        gram_cal=torch.bmm(features,features.transpose(1,2))
+        return gram_cal/(c*h*w)
 
 class Model(nn.Module):
 
@@ -351,7 +355,7 @@ class Model(nn.Module):
         content_features = self.vggencoder(content_images)
         out = self.decoder(content_features)
         return out
-    
+   
     @staticmethod
     def calc_content_loss(generated_features, content_features):
         """
@@ -366,19 +370,13 @@ class Model(nn.Module):
         return F.mse_loss(content_features, generated_features)
     @staticmethod
     def calc_style_loss(generated_middle_features, style_middle_features, colored_middle_features):
-        """
-            First compute the shifted encoding from style and colored image 
-            then calcuate the style loss bw the generated middle features and
-            the normalized features
-
-            ARGS : torch.tensor() middle and initial layer features of generated, style 
-                    and colored image
-            return: style loss
-        """
-        normalized_features = ADAIN(colored_features=colored_middle_features, style_features=style_middle_features)
+        gram_generated = [gram_matrix(f) for f in generated_middle_features]
+        gram_style = [gram_matrix(f) for f in style_middle_features]
+        gram_colored = [gram_matrix(f) for f in colored_middle_features]
         loss = 0
-        # code for the loss
-        return loss
+        for gen, style, color in zip(gram_generated, gram_style, gram_colored):
+            loss += F.mse_loss(gen, style) + F.mse_loss(gen, color)
+        return loss / len(generated_middle_features)
 
     def forward(self, content_images, style_images, colored_images, alpha = 0.5):
         """
@@ -403,7 +401,7 @@ class Model(nn.Module):
         style_middle_features = self.vggencoder(style_images, output_middle_features_only = True)
         colored_middle_features = self.vggencoder(colored_images, output_middle_features_only = True)
         generated_middle_features = self.vggencoder(output, output_middle_features_only = True)
-        style_loss = self.calc_style_loss(generated_middle_features=generated_middle_features,style_middle_features=style_middle_features, colored_middle_features=colored_middle_features)
+        style_loss = self.calc_style_loss(generated_middle_features=generated_middle_features,          style_middle_features=style_middle_features,colored_middle_features=colored_middle_features)
 
         total_loss = content_loss*alpha + (1-alpha)*style_loss
         return total_loss
@@ -431,5 +429,43 @@ def denorm(tensor, device):
 
     return denormalized_tensor
 
+def main(): 
+    enc=VGGEncoder()
+    model=Model(enc)
+    model.to(device)
 
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 
+    epochs = 5  # Change as required
+    for epoch in range(epochs):
+        model.train()
+        total_loss = 0
+
+        for content, style, color in zip(content_dl, style_dl, colored_dl):
+            content, style, color = to_device(content[0], device), to_device(style[0], device), to_device(color[0], device)
+
+            optimizer.zero_grad()
+            loss = model(content, style, color, alpha=0.5)
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item()
+
+        print(f"Epoch {epoch+1}/{epochs}, Loss: {total_loss:.4f}")
+
+    # Save the trained model
+    torch.save(model.state_dict(), "model.pth")
+    print("Model saved!")
+
+    # Evaluate the model
+    model.eval()
+    with torch.no_grad():
+        for content, style, color in zip(content_dl_test, style_dl_test, colored_dl_test):
+            content, style, color = to_device(content[0], device), to_device(style[0], device), to_device(color[0], device)
+            output = model.generate(content)
+            plt.imshow(denorm(output[0].cpu(), device).permute(1, 2, 0))
+            plt.show()
+            break  # Show one example
+
+if __name__=="__main__":
+    main()
