@@ -1,32 +1,58 @@
 # importing all the libraries
-
 import os
-import shutil
-
+# import shutil
 import torch
-import torchvision
-import torch.nn
-
-import numpy as np
-import pandas as pd
+# import torchvision
+import torch.nn as nn
+# import numpy as np
+# import pandas as pd
 from tqdm import tqdm
-
 import torch.nn.functional as F
 from torchvision.models import vgg19
-from torchvision.datasets import ImageFolder
+# from torchvision.datasets import ImageFolder
 from torch.utils.data import DataLoader
 import torchvision.transforms as T
-from torch.utils.data import random_split
-
-
+# from torch.utils.data import random_split
+from torch.utils.data import Dataset
 import PIL 
 from PIL import Image
-import random
-import matplotlib
+# import random
+# import matplotlib
 import matplotlib.pyplot as plt
-import matplotlib.image as mpimg
+# import matplotlib.image as mpimg
 from torchinfo import summary
 import yaml
+import logging
+
+
+
+logging.basicConfig(
+    filename='training.log',    # Log file
+    level=logging.INFO,         # Logging level
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+
+# creating a custom dataloader
+class CustomImageDataset(Dataset):
+    def __init__(self, root_dir, transform=None):
+        self.root_dir = root_dir
+        self.image_files = [f for f in os.listdir(root_dir) if f.endswith('.png')]
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.image_files)
+
+    def __getitem__(self, idx):
+        img_path = os.path.join(self.root_dir, self.image_files[idx])
+        image = Image.open(img_path).convert('RGB')
+        
+        if self.transform:
+            image = self.transform(image)
+        
+        return image
+
 
 
 
@@ -44,40 +70,29 @@ with open(config_path_encoder, "r") as stream:
 
 # image transformation to required mean and std
 
-tfms_content = T.Compose([
-    T.Normalize(encoder_configuration.get("_stats_content")),
-    T.RandomCrop(encoder_configuration.get("random_crop_dimension"))
-])
-train_tfms = T.Compose([
-    T.Normalize(encoder_configuration.get("_stats")),
-    T.RandomCrop(encoder_configuration.get("random_crop_dimension")),
+tfms = T.Compose([
+    T.ToTensor(),
+    T.Normalize(encoder_configuration.get("vgg_mean"), encoder_configuration.get("vgg_std")),
 ])
 
-test_tfms = T.Compose([
-    T.Normalize(encoder_configuration.get("_stats")),
-    T.RandomCrop(encoder_configuration.get("random_crop_dimension")),
-])
+# Use the same transform for all three datasets (img, style, and mask)
+content_dataset = CustomImageDataset('./preprocessedImages/img', tfms)
+style_dataset = CustomImageDataset('./preprocessedImages/style', tfms)
+colored_dataset = CustomImageDataset('./preprocessedImages/mask', tfms)
 
-
-# Data loading and preprocessing train
-content_dataset = ImageFolder('./dataset/img', tfms_content)
-style_dataset = ImageFolder('./dataset/style', train_tfms)
-colored_dataset = ImageFolder('./dataset/mask', train_tfms)
-
-# Data loading and preprocessing test
-content_dataset_test = ImageFolder('./dataset/img', test_tfms)
-style_dataset_test = ImageFolder('./dataset/style', test_tfms)
-colored_dataset_test = ImageFolder('./dataset/mask', test_tfms)
+content_dataset_test = CustomImageDataset('./preprocessedImagesTest/img', tfms)
+style_dataset_test = CustomImageDataset('./preprocessedImagesTest/style', tfms)
+colored_dataset_test = CustomImageDataset('./preprocessedImagesTest/mask', tfms)
 
 # Initializing the dataloader train
-content_dl = DataLoader(content_dataset, batch_size = encoder_configuration.get("batch_size"), shuffle = True, num_workers = 2, drop_last = True)
-style_dl = DataLoader(style_dataset, batch_size = encoder_configuration.get("batch_size"), shuffle = True, num_workers = 2, drop_last = True)
-colored_dl = DataLoader(colored_dataset, batch_size = encoder_configuration.get("batch_size"), shuffle = True, num_workers = 2, drop_last = True)
+content_dl = DataLoader(content_dataset, batch_size = encoder_configuration.get("batch_size"), num_workers = 2, drop_last = True)
+style_dl = DataLoader(style_dataset, batch_size = encoder_configuration.get("batch_size"), num_workers = 2, drop_last = True)
+colored_dl = DataLoader(colored_dataset, batch_size = encoder_configuration.get("batch_size"), num_workers = 2, drop_last = True)
 
 # Initializing the dataloader test
-content_dl_test = DataLoader(content_dataset_test, batch_size = 1, shuffle = True, num_workers = 2, drop_last = True)
-style_dl_test = DataLoader(style_dataset_test, batch_size = 1, shuffle = True, num_workers = 2, drop_last = True)
-colored_dl_test = DataLoader(colored_dataset_test, batch_size = 1, shuffle = True, num_workers = 2, drop_last = True)
+content_dl_test = DataLoader(content_dataset_test, batch_size = 1, num_workers = 2, drop_last = True)
+style_dl_test = DataLoader(style_dataset_test, batch_size = 1, num_workers = 2, drop_last = True)
+colored_dl_test = DataLoader(colored_dataset_test, batch_size = 1, num_workers = 2, drop_last = True)
 
 
 
@@ -154,7 +169,7 @@ class VGGEncoder(nn.Module):
         for p in self.parameters():
             p.requires_grad = False
 
-    def forward(self, images, output_middle_feature_only=False):
+    def forward(self, images, output_initial_middle_features_only=False):
         # Here the images are loaded from device and do we need the last ourput features or not
 
         """ Since we know that we have 
@@ -175,7 +190,7 @@ class VGGEncoder(nn.Module):
         h3 = self.slice3(h2)    
         h4 = self.slice4(h3)   
 
-        if output_middle_feature_only is True:
+        if output_initial_middle_features_only is True:
             return h1, h2, h3
         else:
             return h4
@@ -230,13 +245,11 @@ def ADAIN(colored_features, style_features):
         Returns: shifted feature maps of colored image using style image
     """
 
-    colored_features_mean, colored_features_std = calc_mean_std(colored_features)
-    style_features_mean, style_features_std = calc_mean_std(style_features)
-
-    # Normalizing the colored features 
-
-    normalized_features = style_features_std*(colored_features-colored_features_mean)/colored_features_std + style_features_mean
-
+    normalized_features = []
+    for cf, sf in zip(colored_features, style_features):
+        cf_mean, cf_std = calc_mean_std(cf)
+        sf_mean, sf_std = calc_mean_std(sf)
+        normalized_features.append(sf_std * (cf - cf_mean) / cf_std + sf_mean)
     return normalized_features
 
 
@@ -257,7 +270,7 @@ class RC(torch.nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size = 3, pad_size = 1, activated = True):
         super().__init__()
         self.pad = nn.ReflectionPad2d((pad_size, pad_size, pad_size, pad_size))
-        self.conv = nn.conv2d(in_channels, out_channels, kernel_size)
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size)
         self.activated = activated
 
     def forward(self, x):
@@ -315,7 +328,12 @@ class Decoder(nn.Module):
     
 dec = Decoder()
 
-
+# code for gram matrix loss computed from b&w encodings and modified colored image
+def gram_matrix(features):
+        batch_size,c,h,w=features.size()
+        features=features.view(batch_size,c,-1)
+        gram_cal=torch.bmm(features,features.transpose(1,2))
+        return gram_cal/(c*h*w)
 
 
 class Model(nn.Module):
@@ -377,7 +395,11 @@ class Model(nn.Module):
         """
         normalized_features = ADAIN(colored_features=colored_middle_features, style_features=style_middle_features)
         loss = 0
-        # code for the loss
+        gram_generated = [gram_matrix(f) for f in generated_middle_features]
+        gram_normalized = [gram_matrix(f) for f in normalized_features]
+
+        for gram_generated_loss, gram_normalized_loss in zip(gram_generated, gram_normalized):
+            loss += F.mse_loss(gram_generated_loss, gram_normalized_loss)
         return loss
 
     def forward(self, content_images, style_images, colored_images, alpha = 0.5):
@@ -394,15 +416,15 @@ class Model(nn.Module):
         """         
 
         # content loss
-        content_features = self.vggencoder(content_images, output_middle_features_only = False) # get the deep layers
+        content_features = self.vggencoder(content_images, output_initial_middle_features_only = False) # get the deep layers
         output = self.decoder(content_features)
-        generated_features = self.vggencoder(output, output_middle_features_only = False)
+        generated_features = self.vggencoder(output, output_initial_middle_features_only = False)
         content_loss = self.calc_content_loss(generated_features=generated_features, content_features=content_features)
 
         # style loss
-        style_middle_features = self.vggencoder(style_images, output_middle_features_only = True)
-        colored_middle_features = self.vggencoder(colored_images, output_middle_features_only = True)
-        generated_middle_features = self.vggencoder(output, output_middle_features_only = True)
+        style_middle_features = self.vggencoder(style_images, output_initial_middle_features_only = True)
+        colored_middle_features = self.vggencoder(colored_images, output_initial_middle_features_only = True)
+        generated_middle_features = self.vggencoder(output, output_initial_middle_features_only = True)
         style_loss = self.calc_style_loss(generated_middle_features=generated_middle_features,style_middle_features=style_middle_features, colored_middle_features=colored_middle_features)
 
         total_loss = content_loss*alpha + (1-alpha)*style_loss
@@ -430,6 +452,66 @@ def denorm(tensor, device):
     denormalized_tensor = torch.clamp(tensor * std + mean, 0, 1)
 
     return denormalized_tensor
+
+def main(): 
+    enc = VGGEncoder()
+    model = Model(enc)
+    model.to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    epochs = 5  # Change as required
+    
+    # Directory to save checkpoints
+    checkpoint_dir = './checkpoints'
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    for epoch in range(epochs):
+        model.train()
+        total_loss = 0
+
+        progress_bar = tqdm(content_dl, desc=f"Epoch [{epoch+1}/{epochs}]", leave=False)
+        for content, style, color in zip(content_dl, style_dl, colored_dl):
+            # Assuming ImageFolder returns a tuple (image, label) for each sample,
+            # we extract the first element.
+            content, style, color = to_device(content[0], device), to_device(style[0], device), to_device(color[0], device)
+            optimizer.zero_grad()
+            loss = model(content, style, color, alpha=0.5)
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+            progress_bar.set_postfix({'Loss': f'{loss.item():.4f}'})
+            logging.info(f"Epoch [{epoch+1}/{epochs}] Loss: {loss.item():.4f}")
+        avg_loss = total_loss / len(content_dl)
+        print(f"Epoch [{epoch+1}/{epochs}] - Average Loss: {avg_loss:.4f}")
+        logging.info(f"Epoch [{epoch+1}] Average Loss: {avg_loss:.4f}")
+
+        
+        # Save checkpoint after every epoch
+        checkpoint_path = os.path.join(checkpoint_dir, f"model_epoch_{epoch+1}.pth")
+        torch.save({
+            'epoch': epoch + 1,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'loss': total_loss,
+        }, checkpoint_path)
+        print(f"Checkpoint saved at {checkpoint_path}")
+    
+    # Save the final model
+    torch.save(model.state_dict(), "model.pth")
+    print("Final model saved!")
+  
+    # Evaluate the model
+    model.eval()
+    with torch.no_grad():
+        for content, style, color in zip(content_dl_test, style_dl_test, colored_dl_test):
+            content, style, color = to_device(content[0], device), to_device(style[0], device), to_device(color[0], device)
+            output = model.generate(content)
+            plt.imshow(denorm(output[0].cpu(), device).permute(1, 2, 0))
+            plt.show()
+            break  # Show one example
+  
+if __name__=="__main__":
+    main()
+
 
 
 

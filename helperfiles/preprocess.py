@@ -39,3 +39,21 @@ def is_grey_scale(img_path):
     return img
 
 print(is_grey_scale("/Users/shreyansh/Desktop/style transfer/ADAIN:architecture/testImage/blackWhite.png"))
+
+from PIL import Image
+import os
+import random
+import numpy as np
+
+directory_colored = "/Users/shreyansh/Desktop/style transfer/ADAIN:architecture/dataset/colored"
+directory_black_and_white = "/Users/shreyansh/Desktop/style transfer/ADAIN:architecture/preprocessedImages/img"
+saveFolderDirectory = "/Users/shreyansh/Desktop/style transfer/ADAIN:architecture/preprocessedImages/style/"
+colored_images = os.listdir(directory_colored)
+blackAndWhiteImage = os.listdir(directory_black_and_white)
+cnt = 0
+for images in os.listdir(directory_black_and_white):
+    selectedImageIndex = random.choice(colored_images)
+    selectedImagePath = os.path.join(directory_colored, selectedImageIndex)
+    styleImage = Image.open(selectedImagePath)
+    # print(images)
+    styleImage.save(os.path.join(saveFolderDirectory, images))
